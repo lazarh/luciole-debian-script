@@ -801,7 +801,7 @@ Examples
   ./install.sh --set-default --enable-portal
   ./install.sh --upgrade                    # rebuild from latest source
   ./install.sh --prefix /opt/luciole        # install somewhere else
-  ./install.sh --ref v0.1.0 --install-luciole
+  ./install.sh --ref <tag-or-commit> --install-luciole
   ./install.sh --dry-run                    # show what a full install would do
   ./install.sh --uninstall --purge          # remove files and user data
 EOF

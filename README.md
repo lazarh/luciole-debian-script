@@ -2,6 +2,8 @@
 
 Automated installation script for [Luciole](https://github.com/noctalia-dev/luciole), the native Wayland file manager from the Noctalia developers, on Debian-based systems.
 
+This installer lives at [lazarh/luciole-debian-script](https://github.com/lazarh/luciole-debian-script). Tagged releases (for example `v1.0.0`) can be checked out if you prefer a pinned copy of the script.
+
 ## Overview
 
 This script provides a complete installation workflow for:
@@ -49,7 +51,7 @@ Passing **any** `--install-*`, `--set-default`, `--enable-portal`, `--upgrade` o
 
 ```
 ./install.sh --prefix /opt/luciole            # install somewhere other than /usr/local
-./install.sh --ref v0.1.0 --install-luciole   # build a specific tag, branch or commit
+./install.sh --ref <tag-or-commit> --install-luciole   # build a specific tag, branch or commit
 ./install.sh --dry-run                        # print the commands, change nothing
 ./install.sh --uninstall --purge              # remove files and the user's config/state
 ```
