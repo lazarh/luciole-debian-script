@@ -45,6 +45,20 @@ Passing **any** `--install-*`, `--set-default`, `--enable-portal`, `--upgrade` o
 
 `--ask-step` and `--no-helpers` are orthogonal: they can be combined with the default or with individual flags.
 
+### Build options
+
+```
+./install.sh --prefix /opt/luciole            # install somewhere other than /usr/local
+./install.sh --ref v0.1.0 --install-luciole   # build a specific tag, branch or commit
+./install.sh --dry-run                        # print the commands, change nothing
+./install.sh --uninstall --purge              # remove files and the user's config/state
+```
+
+- `--prefix DIR` must be an absolute path. Use the same prefix for `--upgrade` and `--uninstall`. A custom prefix is not automatically added to `PATH`.
+- `--ref REF` (alias `--tag`) performs a full clone and checks out the ref; without it the script shallow-clones `main`.
+- `--dry-run` prints every mutating command instead of running it. Read-only checks (`pkg-config`, `apt-cache`, the wayland-protocols pool listing) still run.
+- `--purge` can only be combined with `--uninstall`. It deletes the default XDG paths `~/.config/luciole`, `~/.local/state/luciole` and `~/.local/share/luciole` for the invoking user; the shared thumbnail cache is left alone.
+
 ### Interactive menu
 
 ```
@@ -83,7 +97,13 @@ Prompts before each step of a full install, so you can skip components that are 
 
 # Maintenance
 ./install.sh --upgrade            # rebuild from the latest source
-./install.sh --uninstall          # remove Luciole from /usr/local
+./install.sh --uninstall          # remove Luciole from the install prefix
+./install.sh --uninstall --purge  # ...and delete user configuration/state
+
+# Build options
+./install.sh --prefix /opt/luciole
+./install.sh --ref v0.1.0 --install-luciole
+./install.sh --dry-run
 
 # Interaction
 ./install.sh --menu
@@ -116,9 +136,10 @@ Luciole's `meson.build` requires `wayland-protocols` 1.49 or newer. Debian 13 sh
 
 ### [3/4] Build and install Luciole
 
-- Clones [noctalia-dev/luciole](https://github.com/noctalia-dev/luciole)
+- Clones [noctalia-dev/luciole](https://github.com/noctalia-dev/luciole), or checks out the `--ref` you specified
+- Configures with `just configure release <prefix>` (prefix defaults to `/usr/local`)
 - Builds with `just build release` (Meson, release build type with LTO)
-- Installs with `sudo just install release` under `/usr/local`
+- Installs with `sudo just install release` under the prefix
 - Verifies the binary, version and desktop entry
 
 ### [4/4] Runtime helpers (optional)
@@ -164,7 +185,7 @@ Without this step, file dialogs from other applications keep using the session's
 ./install.sh --upgrade
 ```
 
-Clones the latest source and rebuilds and reinstalls Luciole. Your settings in `~/.config/luciole/` are not touched.
+Clones the latest source (or the `--ref` you specify) and rebuilds and reinstalls Luciole into the same prefix. Your settings in `~/.config/luciole/` are not touched. Pass the same `--prefix` you used for the initial install.
 
 Re-running `./install.sh` also refreshes the apt packages.
 
@@ -174,11 +195,14 @@ Re-running `./install.sh` also refreshes the apt packages.
 ./install.sh --uninstall
 ```
 
-Re-clones the latest source, configures it, and runs `ninja uninstall`, which removes the files listed in the current install manifest from `/usr/local`. It asks for confirmation and refuses to run non-interactively.
+Re-clones the source (honouring `--ref`), configures it for the install prefix, and runs `ninja uninstall`, which removes the files listed in the install manifest. It asks for confirmation and refuses to run non-interactively.
+
+Add `--purge` to also delete the invoking user's configuration, state and user scripts (`~/.config/luciole`, `~/.local/state/luciole`, `~/.local/share/luciole`). The shared thumbnail cache is left alone.
 
 Notes:
 
-- If the installed version differs from the latest source, files that only exist in the older version may stay behind. Check `/usr/local/bin/luciole` and `/usr/local/share/luciole` afterwards.
+- Pass the same `--prefix` (and `--ref`, if you installed one) you used for the initial install.
+- If the installed version differs from the source used for uninstalling, files that only exist in the older version may stay behind. Check `<prefix>/bin/luciole` and `<prefix>/share/luciole` afterwards.
 - Run the dependencies step first if `just` or `meson` are gone.
 - apt packages and `wayland-protocols` installed for the build are **not** removed; that is your decision.
 

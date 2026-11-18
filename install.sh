@@ -20,6 +20,12 @@ WAYLAND_PROTOCOLS_SOURCE_VERSION="1.50"
 WAYLAND_PROTOCOLS_POOL="https://deb.debian.org/debian/pool/main/w/wayland-protocols/"
 WAYLAND_PROTOCOLS_RELEASES="https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases"
 
+INSTALL_PREFIX="/usr/local"
+LUCIOLE_REF=""
+DRY_RUN=0
+PURGE=0
+WP_CHECKED=0
+
 ORIG_DIR="$PWD"
 TMP_DIRS=()
 
@@ -56,6 +62,18 @@ step() { # number label
   printf '\n%s[%s] %s%s\n' "$C_BOLD$C_BLUE" "$1" "$2" "$C_RESET"
 }
 
+print_dry() {
+  printf '%s[dry-run]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"
+}
+
+run_cmd() { # execute, or print when dry-running
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry "$*"
+    return 0
+  fi
+  "$@"
+}
+
 # ---------------------------------------------------------------------------
 # Temporary directories
 # ---------------------------------------------------------------------------
@@ -90,7 +108,20 @@ sudo_cmd() {
   fi
 }
 
+sudo_run() { # execute via sudo, or print when dry-running
+  if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ $EUID -eq 0 ]]; then
+      print_dry "$*"
+    else
+      print_dry sudo "$@"
+    fi
+    return 0
+  fi
+  sudo_cmd "$@"
+}
+
 ensure_privileges() {
+  [[ $DRY_RUN -eq 1 ]] && return 0
   [[ $EUID -eq 0 ]] && return 0
   command -v sudo >/dev/null 2>&1 || die "sudo is required to install system packages"
   sudo -v || die "could not obtain sudo privileges"
@@ -107,6 +138,14 @@ target_user() {
 run_as_target_user() {
   local user
   user="$(target_user)"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    if [[ $EUID -eq 0 && -n "$user" ]]; then
+      print_dry sudo -H -u "$user" -- "$@"
+    else
+      print_dry "$@"
+    fi
+    return 0
+  fi
   if [[ $EUID -eq 0 && -n "$user" ]]; then
     sudo -H -u "$user" -- "$@"
   else
@@ -128,7 +167,7 @@ apt_has() {
 
 apt_update() {
   info "refreshing package lists"
-  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update
+  sudo_run env DEBIAN_FRONTEND=noninteractive apt-get update
 }
 
 apt_install() { # packages...
@@ -145,7 +184,7 @@ apt_install() { # packages...
   fi
   ((${#available[@]} > 0)) || return 0
   info "installing: ${available[*]}"
-  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y "${available[@]}"
+  sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "${available[@]}"
 }
 
 confirm() { # prompt, default no
@@ -215,6 +254,10 @@ HELPER_PACKAGES=(
 ensure_just() {
   command -v just >/dev/null 2>&1 && return 0
   warn "just is not available via apt; installing it with cargo"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry "install just via rustup + cargo install --locked just"
+    return 0
+  fi
   if ! command -v cargo >/dev/null 2>&1; then
     info "installing a minimal Rust toolchain with rustup"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -230,6 +273,10 @@ install_dependencies() {
   apt_update
   info "installing build and required runtime packages"
   apt_install "${BUILD_PACKAGES[@]}" "${RUNTIME_PACKAGES[@]}"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    ok "dry run: dependency checks skipped"
+    return 0
+  fi
   ensure_just
   command -v meson >/dev/null 2>&1 || die "meson is not available after installing dependencies"
   command -v pkg-config >/dev/null 2>&1 || die "pkg-config is not available after installing dependencies"
@@ -297,11 +344,11 @@ install_wayland_protocols_from_pool() {
   url="${WAYLAND_PROTOCOLS_POOL}${deb}"
   make_tmp_dir dir
   info "downloading $url"
-  if ! curl -fsSL --max-time 120 "$url" -o "$dir/$deb"; then
+  if ! run_cmd curl -fsSL --max-time 120 "$url" -o "$dir/$deb"; then
     warn "download failed"
     return 1
   fi
-  sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y "$dir/$deb"
+  sudo_run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$dir/$deb"
 }
 
 install_wayland_protocols_from_source() {
@@ -309,6 +356,14 @@ install_wayland_protocols_from_source() {
   info "falling back to building wayland-protocols $version into /usr/local"
   make_tmp_dir dir
   url="$WAYLAND_PROTOCOLS_RELEASES/$version/downloads/wayland-protocols-$version.tar.xz"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry "curl -fsSL $url -o $dir/wayland-protocols.tar.xz"
+    print_dry "tar -xJf $dir/wayland-protocols.tar.xz -C $dir"
+    print_dry "meson setup build --prefix=/usr/local --buildtype=release"
+    print_dry "ninja -C build"
+    print_dry sudo ninja -C build install
+    return 0
+  fi
   if ! curl -fsSL --max-time 120 "$url" -o "$dir/wayland-protocols.tar.xz"; then
     warn "could not download $url"
     print_wayland_protocols_help
@@ -317,9 +372,9 @@ install_wayland_protocols_from_source() {
   tar -xJf "$dir/wayland-protocols.tar.xz" -C "$dir"
   (
     cd "$dir/wayland-protocols-$version"
-    meson setup build --prefix=/usr/local --buildtype=release
-    ninja -C build
-    sudo_cmd ninja -C build install
+    run_cmd meson setup build --prefix=/usr/local --buildtype=release
+    run_cmd ninja -C build
+    sudo_run ninja -C build install
   )
   export PKG_CONFIG_PATH="/usr/local/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 }
@@ -333,6 +388,7 @@ ensure_wayland_protocols() {
   current="$(wp_installed_version)"
   if [[ -n "$current" ]] && version_ge "$current" "$WAYLAND_PROTOCOLS_MIN"; then
     ok "wayland-protocols $current already satisfies the requirement"
+    WP_CHECKED=1
     return 0
   fi
   [[ -n "$current" ]] && info "wayland-protocols $current is too old"
@@ -350,9 +406,15 @@ ensure_wayland_protocols() {
 
   current="$(wp_installed_version)"
   if [[ -z "$current" ]] || ! version_ge "$current" "$WAYLAND_PROTOCOLS_MIN"; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      ok "dry run: wayland-protocols installation not verified"
+      WP_CHECKED=1
+      return 0
+    fi
     die "wayland-protocols >= $WAYLAND_PROTOCOLS_MIN is still not available"
   fi
   ok "wayland-protocols $current is available"
+  WP_CHECKED=1
 }
 
 # ---------------------------------------------------------------------------
@@ -361,36 +423,53 @@ ensure_wayland_protocols() {
 
 verify_installation() {
   local binary version_line
-  binary="$(command -v luciole || true)"
-  [[ -n "$binary" ]] || die "installation failed: the luciole binary is not on PATH"
+  binary="$INSTALL_PREFIX/bin/luciole"
+  [[ -x "$binary" ]] || die "installation failed: $binary is missing"
   ok "installed binary: $binary"
   if version_line="$("$binary" --version 2>/dev/null | head -n1)"; then
     [[ -n "$version_line" ]] && ok "version: $version_line"
   else
-    warn "the installed binary did not report a version; run 'luciole --version' manually"
+    warn "the installed binary did not report a version; run '$binary --version' manually"
   fi
-  if [[ -f /usr/local/share/applications/dev.noctalia.luciole.desktop ]]; then
+  if [[ -f "$INSTALL_PREFIX/share/applications/dev.noctalia.luciole.desktop" ]]; then
     ok "desktop entry installed"
   else
     warn "desktop entry dev.noctalia.luciole.desktop was not found"
   fi
 }
 
+clone_luciole() { # destination
+  if [[ -n "$LUCIOLE_REF" ]]; then
+    info "cloning $LUCIOLE_REPO (ref: $LUCIOLE_REF)"
+    run_cmd git clone "$LUCIOLE_REPO" "$1"
+    run_cmd git -C "$1" checkout "$LUCIOLE_REF"
+  else
+    info "cloning $LUCIOLE_REPO"
+    run_cmd git clone --depth 1 "$LUCIOLE_REPO" "$1"
+  fi
+}
+
 build_and_install_luciole() {
-  local dir wp
-  wp="$(wp_installed_version)"
-  if [[ -z "$wp" ]] || ! version_ge "$wp" "$WAYLAND_PROTOCOLS_MIN"; then
+  local dir
+  if [[ $WP_CHECKED -eq 0 ]]; then
     ensure_wayland_protocols
   fi
   step "3/4" "Build and install Luciole"
   make_tmp_dir dir
-  info "cloning $LUCIOLE_REPO"
-  git clone --depth 1 "$LUCIOLE_REPO" "$dir/luciole"
+  clone_luciole "$dir/luciole"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry just configure release "$INSTALL_PREFIX"
+    print_dry just build release
+    print_dry sudo env PATH="$PATH" just install release
+    info "dry run: skipping build, install and verification"
+    return 0
+  fi
   (
     cd "$dir/luciole"
+    just configure release "$INSTALL_PREFIX"
     info "building the release configuration (this takes a while)"
     just build release
-    info "installing under /usr/local"
+    info "installing under $INSTALL_PREFIX"
     sudo_cmd env PATH="$PATH" just install release
   )
   verify_installation
@@ -427,15 +506,18 @@ set_default_file_manager() {
 enable_filechooser_portal() {
   step "opt" "Use Luciole as the FileChooser portal backend"
   local conf="/etc/xdg/xdg-desktop-portal/portals.conf"
-  if [[ ! -f /usr/local/share/xdg-desktop-portal/portals/luciole.portal ]]; then
+  if [[ ! -f "$INSTALL_PREFIX/share/xdg-desktop-portal/portals/luciole.portal" ]]; then
     warn "Luciole's portal file is missing; install Luciole first"
   fi
-  sudo_cmd mkdir -p /etc/xdg/xdg-desktop-portal
+  sudo_run mkdir -p /etc/xdg/xdg-desktop-portal
   if [[ -f "$conf" && ! -f "$conf.backup" ]]; then
-    sudo_cmd cp -a "$conf" "$conf.backup"
+    sudo_run cp -a "$conf" "$conf.backup"
     info "backed up $conf to $conf.backup"
   fi
-  sudo_cmd python3 - "$conf" <<'PY'
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry "write $conf: [preferred] org.freedesktop.impl.portal.FileChooser=luciole;gtk"
+  else
+    sudo_cmd python3 - "$conf" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -462,10 +544,17 @@ else:
 with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n".join(kept) + "\n")
 PY
-  ok "wrote $conf"
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "dry run: $conf was not written"
+  else
+    ok "wrote $conf"
+  fi
   local uid
   uid="$(id -u "$(target_user)" 2>/dev/null || true)"
-  if [[ -n "$uid" ]] && run_as_target_user env "XDG_RUNTIME_DIR=/run/user/$uid" \
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry systemctl --user restart xdg-desktop-portal
+  elif [[ -n "$uid" ]] && run_as_target_user env "XDG_RUNTIME_DIR=/run/user/$uid" \
     systemctl --user restart xdg-desktop-portal 2>/dev/null; then
     ok "restarted xdg-desktop-portal"
   else
@@ -482,24 +571,67 @@ upgrade_luciole() {
   build_and_install_luciole
 }
 
-uninstall_luciole() {
-  step "uninstall" "Remove Luciole"
-  confirm "Remove Luciole from /usr/local? [y/N] " || {
-    info "cancelled"
+purge_user_data() {
+  local user home path
+  user="$(target_user)"
+  if [[ -z "$user" ]]; then
+    warn "cannot determine the target user; skipping --purge"
     return 0
-  }
-  command -v just >/dev/null 2>&1 || die "just is missing; run the dependencies step first (--install-deps)"
-  command -v meson >/dev/null 2>&1 || die "meson is missing; run the dependencies step first (--install-deps)"
-  local dir
+  fi
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  if [[ -z "$home" || ! -d "$home" ]]; then
+    warn "cannot determine the home directory of $user; skipping --purge"
+    return 0
+  fi
+  for path in "$home/.config/luciole" "$home/.local/state/luciole" "$home/.local/share/luciole"; do
+    if [[ -e "$path" ]]; then
+      run_as_target_user rm -rf -- "$path"
+      if [[ $DRY_RUN -eq 1 ]]; then
+        info "dry run: would remove $path"
+      else
+        ok "removed $path"
+      fi
+    fi
+  done
+  info "the shared thumbnail cache under ~/.cache/thumbnails was left untouched"
+}
+
+uninstall_luciole() {
+  local dir prompt
+  step "uninstall" "Remove Luciole from $INSTALL_PREFIX"
+  if [[ $DRY_RUN -eq 0 ]]; then
+    prompt="Remove Luciole from $INSTALL_PREFIX? [y/N] "
+    if [[ $PURGE -eq 1 ]]; then
+      prompt="Remove Luciole from $INSTALL_PREFIX and delete user configuration/state? [y/N] "
+    fi
+    confirm "$prompt" || {
+      info "cancelled"
+      return 0
+    }
+    command -v just >/dev/null 2>&1 || die "just is missing; run the dependencies step first (--install-deps)"
+    command -v meson >/dev/null 2>&1 || die "meson is missing; run the dependencies step first (--install-deps)"
+  fi
   make_tmp_dir dir
   info "cloning $LUCIOLE_REPO to generate the uninstall manifest"
-  git clone --depth 1 "$LUCIOLE_REPO" "$dir/luciole"
-  (
-    cd "$dir/luciole"
-    just configure release
-    sudo_cmd env PATH="$PATH" just uninstall release
-  )
-  ok "Luciole files were removed from /usr/local"
+  clone_luciole "$dir/luciole"
+  if [[ $DRY_RUN -eq 1 ]]; then
+    print_dry just configure release "$INSTALL_PREFIX"
+    print_dry sudo env PATH="$PATH" just uninstall release
+  else
+    (
+      cd "$dir/luciole"
+      just configure release "$INSTALL_PREFIX"
+      sudo_cmd env PATH="$PATH" just uninstall release
+    )
+  fi
+  if [[ $DRY_RUN -eq 1 ]]; then
+    info "dry run: Luciole files were not removed"
+  else
+    ok "Luciole files were removed from $INSTALL_PREFIX"
+  fi
+  if [[ $PURGE -eq 1 ]]; then
+    purge_user_data
+  fi
   warn "apt packages and wayland-protocols installed earlier were left in place"
 }
 
@@ -508,8 +640,16 @@ uninstall_luciole() {
 # ---------------------------------------------------------------------------
 
 post_install() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    step "done" "Dry run finished"
+    info "no changes were made"
+    return 0
+  fi
   step "done" "Luciole is installed"
-  info "start it from a Wayland session with: luciole"
+  info "start it from a Wayland session with: $INSTALL_PREFIX/bin/luciole"
+  if [[ "$INSTALL_PREFIX" != "/usr/local" ]]; then
+    info "note: $INSTALL_PREFIX/bin may not be on PATH"
+  fi
   info "optional: ./install.sh --set-default   (default file manager)"
   info "optional: ./install.sh --enable-portal (FileChooser portal backend)"
   if [[ -t 0 ]]; then
@@ -640,11 +780,17 @@ Optional
 
 Maintenance
   --upgrade             Rebuild and reinstall Luciole from the latest source
-  --uninstall           Remove Luciole from /usr/local
+  --uninstall           Remove Luciole from the install prefix
+  --purge               With --uninstall, also delete user configuration/state
+
+Build options
+  --prefix DIR          Install under DIR instead of /usr/local
+  --ref REF, --tag REF  Build a specific tag, branch or commit instead of main
 
 Interaction
   --menu                Show the interactive component menu
   --ask-step            Ask before each step of a full install
+  --dry-run             Print the commands instead of running them
   -h, --help            Show this help
 
 Examples
@@ -654,6 +800,10 @@ Examples
   ./install.sh --install-luciole            # only build and install
   ./install.sh --set-default --enable-portal
   ./install.sh --upgrade                    # rebuild from latest source
+  ./install.sh --prefix /opt/luciole        # install somewhere else
+  ./install.sh --ref v0.1.0 --install-luciole
+  ./install.sh --dry-run                    # show what a full install would do
+  ./install.sh --uninstall --purge          # remove files and user data
 EOF
 }
 
@@ -670,6 +820,25 @@ main() {
       --menu) show_menu=1 ;;
       --ask-step) ASK_STEP=1 ;;
       --no-helpers) WITH_HELPERS=0 ;;
+      --dry-run) DRY_RUN=1 ;;
+      --purge) PURGE=1 ;;
+      --prefix)
+        (($# >= 2)) || die "--prefix requires a directory"
+        INSTALL_PREFIX="${2%/}"
+        shift
+        ;;
+      --prefix=*)
+        INSTALL_PREFIX="${1#*=}"
+        INSTALL_PREFIX="${INSTALL_PREFIX%/}"
+        ;;
+      --ref | --tag)
+        (($# >= 2)) || die "$1 requires a value"
+        LUCIOLE_REF="$2"
+        shift
+        ;;
+      --ref=* | --tag=*)
+        LUCIOLE_REF="${1#*=}"
+        ;;
       --install-deps) opt_deps=1 has_action=1 ;;
       --install-luciole) opt_luciole=1 has_action=1 ;;
       --install-helpers) opt_helpers=1 has_action=1 ;;
@@ -689,6 +858,12 @@ main() {
     esac
     shift
   done
+
+  [[ -n "$INSTALL_PREFIX" && "$INSTALL_PREFIX" == /* ]] \
+    || die "--prefix must be an absolute path (got: '$INSTALL_PREFIX')"
+  if [[ $PURGE -eq 1 && $opt_uninstall -eq 0 ]]; then
+    die "--purge can only be used together with --uninstall"
+  fi
 
   detect_debian
   ensure_privileges
